@@ -1,46 +1,171 @@
-name: Release Build
+name: Build and Release
 
 on:
-  workflow_dispatch:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'  # Triggers on version tags like v0.2.8, v1.0.0, etc.
+  workflow_dispatch:  # Allows manual triggering
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-release:
-    name: Build and Release
-    runs-on: ubuntu-latest
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: prayerway-linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: prayerway-linux-aarch64
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            name: prayerway-windows-x86_64.exe
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: prayerway-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: prayerway-macos-aarch64
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: actions-rs/setup-rust@v1  # Corrected organization name
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          components: rustfmt, clippy
-          override: true
+          targets: ${{ matrix.target }}
 
-      - name: Build binary (Release)
-        run: cargo build --release
-
-      - name: Prepare dist directory
+      - name: Install cross-compilation tools (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          mkdir -p dist/assets
-          cp target/release/prayerway dist/
-          cp -r assets/* dist/assets/
-          chmod +x dist/prayerway
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
+          
+      - name: Install cross
+        if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'x86_64-pc-windows-gnu'
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Create archive
-        run: tar czvf prayerway-linux-x86_64.tar.gz -C dist .
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Upload release asset
-        uses: actions/upload-release-asset@v1
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build binary (native)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'x86_64-apple-darwin' || matrix.target == 'aarch64-apple-darwin'
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Build binary (cross-compiled)
+        if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          cross build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary
+        run: |
+          mkdir -p artifacts
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-gnu" ]; then
+            cp target/${{ matrix.target }}/release/prayerway.exe artifacts/${{ matrix.name }}
+          else
+            cp target/${{ matrix.target }}/release/prayerway artifacts/${{ matrix.name }}
+          fi
+          
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: artifacts/${{ matrix.name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          for dir in artifacts/*/; do
+            if [ -d "$dir" ]; then
+              cp "$dir"* release-assets/
+            fi
+          done
+          ls -la release-assets/
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          cat > release_notes.md << 'EOF'
+          ## PrayerWay ${{ steps.version.outputs.VERSION }}
+          
+          ### Features
+          - Islamic prayer times with customizable calculation methods
+          - Support for multiple cities and countries
+          - Arabic and English language support
+          - 12-hour and 24-hour time formats
+          - Hijri date display
+          - Notification system with custom audio support
+          
+          ### Downloads
+          Choose the appropriate binary for your system:
+          - **Linux x86_64**: `prayerway-linux-x86_64`
+          - **Linux ARM64**: `prayerway-linux-aarch64`  
+          - **Windows x86_64**: `prayerway-windows-x86_64.exe`
+          - **macOS x86_64**: `prayerway-macos-x86_64`
+          - **macOS ARM64** (Apple Silicon): `prayerway-macos-aarch64`
+          
+          ### Usage
+          ```bash
+          prayerway --city "Cairo" --country "Egypt" --method "4"
+          ```
+          
+          ### Installation
+          1. Download the appropriate binary for your system
+          2. Make it executable: `chmod +x prayerway-*`
+          3. Move to your PATH: `sudo mv prayerway-* /usr/local/bin/prayerway`
+          
+          For more information, visit the [project repository](https://github.com/${{ github.repository }}).
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: PrayerWay ${{ steps.version.outputs.VERSION }}
+          body_path: release_notes.md
+          files: release-assets/*
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./prayerway-linux-x86_64.tar.gz
-          asset_name: prayerway-linux-x86_64.tar.gz
-          asset_content_type: application/gzip
