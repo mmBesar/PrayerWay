@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust@v1
+        uses: actions-rs/setup-rust@v1  # Corrected organization name
         with:
           profile: minimal
           toolchain: stable
