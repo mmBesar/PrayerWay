@@ -1,0 +1,20 @@
+[package]
+name = "prayerway"
+version = "0.2.8"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+chrono = "0.4.31"
+clap = { version = "4.4.18", features = ["derive"] }
+reqwest = { version = "0.11.23", default-features = false, features = [
+  "blocking",
+  "json",
+  "rustls-tls",
+] }
+serde_json = "1.0.111"
+serde = { version = "1.0", features = ["derive"] }
+
+[[bin]]
+name = "prayerway"
+path = "./src/main.rs"
